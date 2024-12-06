@@ -46,6 +46,7 @@ func TestInvalidDDLJob(t *testing.T) {
 	store, dom := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
 
 	job := &model.Job{
+		Version:             model.GetJobVerInUse(),
 		SchemaID:            0,
 		TableID:             0,
 		Type:                model.ActionNone,
@@ -65,7 +66,11 @@ func TestAddBatchJobError(t *testing.T) {
 
 	require.Nil(t, failpoint.Enable("github.com/pingcap/tidb/pkg/ddl/mockAddBatchDDLJobsErr", `return(true)`))
 	// Test the job runner should not hang forever.
-	job := &model.Job{SchemaID: 1, TableID: 1}
+	job := &model.Job{
+		Version:  model.GetJobVerInUse(),
+		SchemaID: 1,
+		TableID:  1,
+	}
 	ctx.SetValue(sessionctx.QueryString, "skip")
 	de := dom.DDLExecutor().(ddl.ExecutorForTest)
 	err := de.DoDDLJobWrapper(ctx, ddl.NewJobWrapper(job, true))
@@ -246,28 +251,4 @@ func TestJobNeedGC(t *testing.T) {
 			{Type: model.ActionRebaseAutoID, State: model.JobStateCancelled},
 		}}}
 	require.True(t, ddl.JobNeedGC(job))
-}
-
-func TestUsingReorgCtx(t *testing.T) {
-	_, domain := testkit.CreateMockStoreAndDomainWithSchemaLease(t, testLease)
-	d := domain.DDL()
-
-	wg := util.WaitGroupWrapper{}
-	wg.Run(func() {
-		jobID := int64(1)
-		for i := 0; i < 500; i++ {
-			d.(ddl.DDLForTest).NewReorgCtx(jobID, 0)
-			d.(ddl.DDLForTest).GetReorgCtx(jobID).IsReorgCanceled()
-			d.(ddl.DDLForTest).RemoveReorgCtx(jobID)
-		}
-	})
-	wg.Run(func() {
-		jobID := int64(1)
-		for i := 0; i < 500; i++ {
-			d.(ddl.DDLForTest).NewReorgCtx(jobID, 0)
-			d.(ddl.DDLForTest).GetReorgCtx(jobID).IsReorgCanceled()
-			d.(ddl.DDLForTest).RemoveReorgCtx(jobID)
-		}
-	})
-	wg.Wait()
 }

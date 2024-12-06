@@ -16,9 +16,12 @@ package memo
 
 import (
 	"container/list"
+	"fmt"
+	"strconv"
 
 	"github.com/pingcap/tidb/pkg/planner/cascades/base"
-	"github.com/pingcap/tidb/pkg/planner/pattern"
+	"github.com/pingcap/tidb/pkg/planner/cascades/pattern"
+	"github.com/pingcap/tidb/pkg/planner/cascades/util"
 	"github.com/pingcap/tidb/pkg/planner/property"
 )
 
@@ -33,9 +36,9 @@ type Group struct {
 	// logicalExpressions indicates the logical equiv classes for this group.
 	logicalExpressions *list.List
 
-	// operand2FirstExpr is used to locate to the first same type logical expression
+	// Operand2FirstExpr is used to locate to the first same type logical expression
 	// in list above instead of traverse them all.
-	operand2FirstExpr map[pattern.Operand]*list.Element
+	Operand2FirstExpr map[pattern.Operand]*list.Element
 
 	// hash2GroupExpr is used to de-duplication in the list.
 	hash2GroupExpr map[uint64]*list.Element
@@ -56,25 +59,28 @@ func (g *Group) Hash64(h base.Hasher) {
 
 // Equals implements the HashEquals.<1st> interface.
 func (g *Group) Equals(other any) bool {
-	if other == nil {
+	g2, ok := other.(*Group)
+	if !ok {
 		return false
 	}
-	switch x := other.(type) {
-	case *Group:
-		return g.groupID == x.groupID
-	case Group:
-		return g.groupID == x.groupID
-	default:
+	if g == nil {
+		return g2 == nil
+	}
+	if g2 == nil {
 		return false
 	}
+	return g.groupID == g2.groupID
 }
 
 // ******************************************* end of HashEqual methods *******************************************
 
 // Exists checks whether a Group expression existed in a Group.
-func (g *Group) Exists(hash64u uint64) bool {
-	_, ok := g.hash2GroupExpr[hash64u]
-	return ok
+func (g *Group) Exists(e *GroupExpression) bool {
+	one, ok := g.hash2GroupExpr[e.GetHash64()]
+	if !ok {
+		return false
+	}
+	return one.Value.(*GroupExpression).Equals(e)
 }
 
 // Insert adds a GroupExpression to the Group.
@@ -83,24 +89,47 @@ func (g *Group) Insert(e *GroupExpression) bool {
 		return false
 	}
 	// GroupExpressions hash should be initialized within Init(xxx) method.
-	hash64 := e.Sum64()
-	if g.Exists(hash64) {
+	if g.Exists(e) {
 		return false
 	}
-	operand := pattern.GetOperand(e.logicalPlan)
+	operand := pattern.GetOperand(e.LogicalPlan)
 	var newEquiv *list.Element
-	mark, ok := g.operand2FirstExpr[operand]
+	mark, ok := g.Operand2FirstExpr[operand]
 	if ok {
 		// cluster same operands together.
 		newEquiv = g.logicalExpressions.InsertAfter(e, mark)
 	} else {
 		// otherwise, put it at the end.
 		newEquiv = g.logicalExpressions.PushBack(e)
-		g.operand2FirstExpr[operand] = newEquiv
+		g.Operand2FirstExpr[operand] = newEquiv
 	}
-	g.hash2GroupExpr[hash64] = newEquiv
+	g.hash2GroupExpr[e.GetHash64()] = newEquiv
 	e.group = g
 	return true
+}
+
+// GetGroupID gets the group id.
+func (g *Group) GetGroupID() GroupID {
+	return g.groupID
+}
+
+// GetLogicalExpressions gets the logical expressions list.
+func (g *Group) GetLogicalExpressions() *list.List {
+	return g.logicalExpressions
+}
+
+// GetFirstElem returns the first Group expression which matches the Operand.
+// Return a nil pointer if there isn't.
+func (g *Group) GetFirstElem(operand pattern.Operand) *list.Element {
+	if operand == pattern.OperandAny {
+		return g.logicalExpressions.Front()
+	}
+	return g.Operand2FirstExpr[operand]
+}
+
+// String implements fmt.Stringer interface.
+func (g *Group) String(w util.StrBufferWriter) {
+	w.WriteString(fmt.Sprintf("inputs:%s", strconv.Itoa(int(g.groupID))))
 }
 
 // NewGroup creates a new Group with given logical prop.
@@ -108,7 +137,7 @@ func NewGroup(prop *property.LogicalProperty) *Group {
 	g := &Group{
 		logicalExpressions: list.New(),
 		hash2GroupExpr:     make(map[uint64]*list.Element),
-		operand2FirstExpr:  make(map[pattern.Operand]*list.Element),
+		Operand2FirstExpr:  make(map[pattern.Operand]*list.Element),
 		logicalProp:        prop,
 	}
 	return g

@@ -33,6 +33,8 @@ import (
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tikv/client-go/v2/tikv"
+	"github.com/tikv/client-go/v2/tikvrpc"
 )
 
 func newTTLTableStatusRows(status ...*cache.TableStatus) []chunk.Row {
@@ -194,8 +196,12 @@ func (m *JobManager) TaskManager() *taskManager {
 }
 
 // UpdateHeartBeat is an exported version of updateHeartBeat for test
-func (m *JobManager) UpdateHeartBeat(ctx context.Context, se session.Session, now time.Time) error {
-	return m.updateHeartBeat(ctx, se, now)
+func (m *JobManager) UpdateHeartBeat(ctx context.Context, se session.Session, now time.Time) {
+	m.updateHeartBeat(ctx, se, now)
+}
+
+func (m *JobManager) UpdateHeartBeatForJob(ctx context.Context, se session.Session, now time.Time, job *ttlJob) error {
+	return m.updateHeartBeatForJob(ctx, se, now, job)
 }
 
 // ReportMetrics is an exported version of reportMetrics
@@ -294,6 +300,7 @@ func TestOnTimerTick(t *testing.T) {
 
 	now := time.UnixMilli(3600 * 24)
 	syncer := NewTTLTimerSyncer(m.sessPool, timerapi.NewDefaultTimerClient(timerStore))
+	defer m.sessPool.(*mockSessionPool).AssertNoSessionInUse()
 	syncer.nowFunc = func() time.Time {
 		return now
 	}
@@ -318,7 +325,7 @@ func TestOnTimerTick(t *testing.T) {
 	require.Equal(t, now, syncTime)
 
 	// resume after a very short duration
-	now = now.Add(time.Second)
+	now = now.Add(time.Microsecond * 999)
 	se.sessionInfoSchema = newMockInfoSchemaWithVer(101, tbl.TableInfo)
 	m.onTimerTick(se, rt, syncer, now)
 	require.Same(t, innerRT, rt.rt)
@@ -326,10 +333,10 @@ func TestOnTimerTick(t *testing.T) {
 	require.Equal(t, 1, len(syncer.key2Timers))
 	syncTime, syncVer = syncer.GetLastSyncInfo()
 	require.Equal(t, int64(100), syncVer)
-	require.Equal(t, now.Add(-time.Second), syncTime)
+	require.Equal(t, now.Add(-999*time.Microsecond), syncTime)
 
 	// resume after a middle duration
-	now = now.Add(6 * time.Second)
+	now = now.Add(2 * time.Millisecond)
 	m.onTimerTick(se, rt, syncer, now)
 	require.Same(t, innerRT, rt.rt)
 	require.True(t, innerRT.Running())
@@ -663,4 +670,19 @@ func TestLocalJobs(t *testing.T) {
 	}
 	assert.Len(t, m.localJobs(), 1)
 	assert.Equal(t, m.localJobs()[0].id, "1")
+}
+
+func TestSplitCnt(t *testing.T) {
+	require.Equal(t, 64, getScanSplitCnt(nil))
+	require.Equal(t, 64, getScanSplitCnt(&mockKVStore{}))
+
+	s := &mockTiKVStore{regionCache: tikv.NewRegionCache(nil)}
+	for i := uint64(1); i <= 128; i++ {
+		s.GetRegionCache().SetRegionCacheStore(i, "", "", tikvrpc.TiKV, 1, nil)
+		if i <= 64 {
+			require.Equal(t, 64, getScanSplitCnt(s))
+		} else {
+			require.Equal(t, int(i), getScanSplitCnt(s))
+		}
+	}
 }

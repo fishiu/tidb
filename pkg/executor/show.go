@@ -200,7 +200,7 @@ func (e *ShowExec) fetchAll(ctx context.Context) error {
 	case ast.ShowEngines:
 		return e.fetchShowEngines(ctx)
 	case ast.ShowGrants:
-		return e.fetchShowGrants()
+		return e.fetchShowGrants(ctx)
 	case ast.ShowIndex:
 		return e.fetchShowIndex()
 	case ast.ShowProcedureStatus:
@@ -1429,7 +1429,10 @@ func constructResultOfShowCreateTable(ctx sessionctx.Context, dbName *pmodel.CIS
 			restoreCtx.WriteKeyWord("TTL_JOB_INTERVAL")
 			restoreCtx.WritePlain("=")
 			if len(tableInfo.TTLInfo.JobInterval) == 0 {
-				restoreCtx.WriteString(model.DefaultJobIntervalStr)
+				// This only happens when the table is created from 6.5 in which the `tidb_job_interval` is not introduced yet.
+				// We use `OldDefaultTTLJobInterval` as the return value to ensure a consistent behavior for the
+				// upgrades: v6.5 -> v8.5(or previous version) -> newer version than v8.5.
+				restoreCtx.WriteString(model.OldDefaultTTLJobInterval)
 			} else {
 				restoreCtx.WriteString(tableInfo.TTLInfo.JobInterval)
 			}
@@ -1761,9 +1764,12 @@ func (e *ShowExec) fetchShowCreateUser(ctx context.Context) error {
 			fmt.Sprintf("'%s'@'%s'", e.User.Username, e.User.Hostname))
 	}
 
-	authplugin := mysql.AuthNativePassword
+	authPlugin, err := e.Ctx().GetSessionVars().GlobalVarsAccessor.GetGlobalSysVar(variable.DefaultAuthPlugin)
+	if err != nil {
+		return errors.Trace(err)
+	}
 	if len(rows) == 1 && rows[0].GetString(0) != "" {
-		authplugin = rows[0].GetString(0)
+		authPlugin = rows[0].GetString(0)
 	}
 
 	accountLockedRaw := rows[0].GetString(1)
@@ -1839,20 +1845,20 @@ func (e *ShowExec) fetchShowCreateUser(ctx context.Context) error {
 		require = privValue.RequireStr()
 	}
 
-	authData := checker.GetEncodedPassword(e.User.Username, e.User.Hostname)
+	authData := checker.GetEncodedPassword(ctx, e.User.Username, e.User.Hostname)
 	authStr := ""
-	if !(authplugin == mysql.AuthSocket && authData == "") {
+	if !(authPlugin == mysql.AuthSocket && authData == "") {
 		authStr = fmt.Sprintf(" AS '%s'", authData)
 	}
 
 	// FIXME: the returned string is not escaped safely
 	showStr := fmt.Sprintf("CREATE USER '%s'@'%s' IDENTIFIED WITH '%s'%s REQUIRE %s%s %s ACCOUNT %s PASSWORD HISTORY %s PASSWORD REUSE INTERVAL %s%s%s%s",
-		e.User.Username, e.User.Hostname, authplugin, authStr, require, tokenIssuer, passwordExpiredStr, accountLocked, passwordHistory, passwordReuseInterval, failedLoginAttempts, passwordLockTimeDays, userAttributes)
+		e.User.Username, e.User.Hostname, authPlugin, authStr, require, tokenIssuer, passwordExpiredStr, accountLocked, passwordHistory, passwordReuseInterval, failedLoginAttempts, passwordLockTimeDays, userAttributes)
 	e.appendRow([]any{showStr})
 	return nil
 }
 
-func (e *ShowExec) fetchShowGrants() error {
+func (e *ShowExec) fetchShowGrants(ctx context.Context) error {
 	vars := e.Ctx().GetSessionVars()
 	checker := privilege.GetPrivilegeManager(e.Ctx())
 	if checker == nil {
@@ -1881,11 +1887,11 @@ func (e *ShowExec) fetchShowGrants() error {
 		if r.Hostname == "" {
 			r.Hostname = "%"
 		}
-		if !checker.FindEdge(e.Ctx(), r, e.User) {
+		if !checker.FindEdge(ctx, r, e.User) {
 			return exeerrors.ErrRoleNotGranted.GenWithStackByArgs(r.String(), e.User.String())
 		}
 	}
-	gs, err := checker.ShowGrants(e.Ctx(), e.User, e.Roles)
+	gs, err := checker.ShowGrants(ctx, e.Ctx(), e.User, e.Roles)
 	if err != nil {
 		return errors.Trace(err)
 	}

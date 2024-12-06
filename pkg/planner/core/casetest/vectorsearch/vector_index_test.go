@@ -15,6 +15,7 @@
 package vectorsearch
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -22,13 +23,17 @@ import (
 	"github.com/pingcap/tidb/pkg/domain"
 	"github.com/pingcap/tidb/pkg/domain/infosync"
 	"github.com/pingcap/tidb/pkg/meta/model"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/planner"
 	"github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/planner/core/base"
-	"github.com/pingcap/tidb/pkg/planner/util/coretestsdk"
+	"github.com/pingcap/tidb/pkg/planner/core/resolve"
+	"github.com/pingcap/tidb/pkg/session"
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/pingcap/tidb/pkg/testkit/testdata"
 	"github.com/pingcap/tidb/pkg/testkit/testfailpoint"
+	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/plancodec"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/stretchr/testify/require"
@@ -81,7 +86,7 @@ func TestTiFlashANNIndex(t *testing.T) {
 		tk.MustExec("insert into t1(vec, a, b, c, d) select vec, a, b, c, d from t1")
 	}
 	dom := domain.GetDomain(tk.Session())
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "t1")
+	testkit.SetTiFlashReplica(t, dom, "test", "t1")
 	tk.MustExec("analyze table t1")
 
 	tk.MustExec("set @@tidb_isolation_read_engines = 'tiflash'")
@@ -157,11 +162,11 @@ func TestANNIndexNormalizedPlan(t *testing.T) {
 	`)
 
 	dom := domain.GetDomain(tk.Session())
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "t")
+	testkit.SetTiFlashReplica(t, dom, "test", "t")
 
 	tk.MustExec("analyze table t")
 
-	tk.MustExec("set @@tidb_isolation_read_engines = 'tiflash'")
+	tk.MustExec("set @@tidb_isolation_read_engines = 'tiflash, tikv'")
 
 	tk.MustExec("explain select * from t order by vec_cosine_distance(vec, '[0,0,0]') limit 1")
 	p1, d1 := getNormalizedPlan()
@@ -190,6 +195,25 @@ func TestANNIndexNormalizedPlan(t *testing.T) {
 	require.Equal(t, d1, d2)
 	require.Equal(t, d1, d3)
 	require.NotEqual(t, d1, dx1)
+
+	// test for TiFlashReplica's Available
+	tbl, err := dom.InfoSchema().TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
+	require.NoError(t, err)
+	tbl.Meta().TiFlashReplica.Available = false
+	tk.MustExec("explain select * from t order by vec_cosine_distance(vec, '[1,2,3]') limit 3")
+	p2, _ := getNormalizedPlan()
+	require.Equal(t, []string{
+		" Projection              root test.t.vec",
+		" └─TopN                  root ?",
+		"   └─Projection          root test.t.vec, vec_cosine_distance(test.t.vec, ?)",
+		"     └─TableReader       root ",
+		"       └─TopN            cop  vec_cosine_distance(test.t.vec, ?)",
+		"         └─TableFullScan cop  table:t, range:[?,?], keep order:false",
+	}, p2)
+	tbl.Meta().TiFlashReplica.Available = true
+	tk.MustExec("explain select * from t order by vec_cosine_distance(vec, '[1,2,3]') limit 3")
+	_, d4 := getNormalizedPlan()
+	require.Equal(t, d1, d4)
 }
 
 func TestANNInexWithSimpleCBO(t *testing.T) {
@@ -221,6 +245,70 @@ func TestANNInexWithSimpleCBO(t *testing.T) {
 	tk.MustExec("alter table t1 set tiflash replica 1;")
 	tk.MustExec("alter table t1 add vector index ((vec_cosine_distance(vec))) USING HNSW;")
 	dom := domain.GetDomain(tk.Session())
-	coretestsdk.SetTiFlashReplica(t, dom, "test", "t1")
+	testkit.SetTiFlashReplica(t, dom, "test", "t1")
 	tk.MustUseIndex("select * from t1 order by vec_cosine_distance(vec, '[1,1,1]') limit 1", "vector_index")
+}
+
+func TestANNIndexWithNonIntClusteredPk(t *testing.T) {
+	store := testkit.CreateMockStoreWithSchemaLease(t, 1*time.Second, mockstore.WithMockTiFlash(2))
+
+	tk := testkit.NewTestKit(t, store)
+
+	tiflash := infosync.NewMockTiFlash()
+	infosync.SetMockTiFlash(tiflash)
+	defer func() {
+		tiflash.Lock()
+		tiflash.StatusServer.Close()
+		tiflash.Unlock()
+	}()
+
+	testfailpoint.Enable(t, "github.com/pingcap/tidb/pkg/ddl/MockCheckVectorIndexProcess", `return(1)`)
+
+	tk.MustExec("use test")
+	tk.MustExec("drop table if exists t1")
+	tk.MustExec(`
+		create table t1 (
+			vec vector(3),
+			a int,
+			b int,
+			c vector(3),
+			d vector,
+			primary key (a, b)
+		)
+	`)
+	tk.MustExec("alter table t1 set tiflash replica 1;")
+	tk.MustExec("alter table t1 add vector index ((vec_cosine_distance(vec))) USING HNSW;")
+	tk.MustExec("insert into t1 values ('[1,1,1]', 1, 1, '[1,1,1]', '[1,1,1]')")
+	dom := domain.GetDomain(tk.Session())
+	testkit.SetTiFlashReplica(t, dom, "test", "t1")
+	sctx := tk.Session()
+	stmts, err := session.Parse(sctx, "select * from t1 use index(vector_index) order by vec_cosine_distance(vec, '[1,1,1]') limit 1")
+	require.NoError(t, err)
+	require.Len(t, stmts, 1)
+	stmt := stmts[0]
+	ret := &core.PreprocessorReturn{}
+	nodeW := resolve.NewNodeW(stmt)
+	err = core.Preprocess(context.Background(), sctx, nodeW, core.WithPreprocessorReturn(ret))
+	require.NoError(t, err)
+	var finalPlanTree base.Plan
+	finalPlanTree, _, err = planner.Optimize(context.Background(), sctx, nodeW, ret.InfoSchema)
+	require.NoError(t, err)
+	physicalTree, ok := finalPlanTree.(base.PhysicalPlan)
+	require.True(t, ok)
+	// Find the PhysicalTableReader node.
+	tableReader := physicalTree
+	for ; len(tableReader.Children()) > 0; tableReader = tableReader.Children()[0] {
+	}
+	castedTableReader, ok := tableReader.(*core.PhysicalTableReader)
+	require.True(t, ok)
+	tableScan, err := castedTableReader.GetTableScan()
+	require.NoError(t, err)
+	// Check that it has the extra vector index information.
+	require.NotNil(t, tableScan.AnnIndexExtra)
+	require.Len(t, tableScan.Ranges, 1)
+	// Check that it's full scan.
+	require.Equal(t, "[-inf,+inf]", tableScan.Ranges[0].String())
+	// Check that the -inf and +inf are the correct types.
+	require.Equal(t, types.KindMinNotNull, tableScan.Ranges[0].LowVal[0].Kind())
+	require.Equal(t, types.KindMaxValue, tableScan.Ranges[0].HighVal[0].Kind())
 }
