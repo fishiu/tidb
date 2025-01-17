@@ -140,12 +140,9 @@ func MockEmptySchemasReplace() *stream.SchemasReplace {
 	dbMap := make(map[stream.UpstreamID]*stream.DBReplace)
 	return stream.NewSchemasReplace(
 		dbMap,
-		true,
 		nil,
 		1,
 		filter.All(),
-		nil,
-		nil,
 		nil,
 	)
 }
@@ -1387,16 +1384,16 @@ func TestInitSchemasReplaceForDDL(t *testing.T) {
 
 	{
 		client := logclient.TEST_NewLogClient(123, 1, 2, 1, domain.NewMockDomain(), fakeSession{})
-		cfg := &logclient.InitSchemaConfig{IsNewTask: false}
-		_, err := client.InitSchemasReplaceForDDL(ctx, cfg, nil)
+		cfg := &logclient.BuildTableMappingManagerConfig{CurrentIdMapSaved: false}
+		_, err := client.BuildTableMappingManager(ctx, cfg)
 		require.Error(t, err)
 		require.Regexp(t, "failed to get pitr id map from mysql.tidb_pitr_id_map.* [2, 1]", err.Error())
 	}
 
 	{
 		client := logclient.TEST_NewLogClient(123, 1, 2, 1, domain.NewMockDomain(), fakeSession{})
-		cfg := &logclient.InitSchemaConfig{IsNewTask: true}
-		_, err := client.InitSchemasReplaceForDDL(ctx, cfg, nil)
+		cfg := &logclient.BuildTableMappingManagerConfig{CurrentIdMapSaved: true}
+		_, err := client.BuildTableMappingManager(ctx, cfg)
 		require.Error(t, err)
 		require.Regexp(t, "failed to get pitr id map from mysql.tidb_pitr_id_map.* [1, 1]", err.Error())
 	}
@@ -1409,8 +1406,8 @@ func TestInitSchemasReplaceForDDL(t *testing.T) {
 		se, err := g.CreateSession(s.Mock.Storage)
 		require.NoError(t, err)
 		client := logclient.TEST_NewLogClient(123, 1, 2, 1, domain.NewMockDomain(), se)
-		cfg := &logclient.InitSchemaConfig{IsNewTask: true}
-		_, err = client.InitSchemasReplaceForDDL(ctx, cfg, nil)
+		cfg := &logclient.BuildTableMappingManagerConfig{CurrentIdMapSaved: true}
+		_, err = client.BuildTableMappingManager(ctx, cfg)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "miss upstream table information at `start-ts`(1) but the full backup path is not specified")
 	}
@@ -1480,10 +1477,10 @@ func TestPITRIDMap(t *testing.T) {
 	se, err := g.CreateSession(s.Mock.Storage)
 	require.NoError(t, err)
 	client := logclient.TEST_NewLogClient(123, 1, 2, 3, nil, se)
-	baseSchemaReplaces := &stream.SchemasReplace{
-		DbMap: getDBMap(),
+	baseTableMappingManager := &stream.TableMappingManager{
+		DbReplaceMap: getDBMap(),
 	}
-	err = client.TEST_saveIDMap(ctx, baseSchemaReplaces)
+	err = client.TEST_saveIDMap(ctx, baseTableMappingManager)
 	require.NoError(t, err)
 	newSchemaReplaces, err := client.TEST_initSchemasMap(ctx, 1)
 	require.NoError(t, err)
@@ -1495,9 +1492,9 @@ func TestPITRIDMap(t *testing.T) {
 	newSchemaReplaces, err = client.TEST_initSchemasMap(ctx, 2)
 	require.NoError(t, err)
 
-	require.Equal(t, len(baseSchemaReplaces.DbMap), len(newSchemaReplaces))
+	require.Equal(t, len(baseTableMappingManager.DbReplaceMap), len(newSchemaReplaces))
 	for _, dbMap := range newSchemaReplaces {
-		baseDbMap := baseSchemaReplaces.DbMap[dbMap.IdMap.UpstreamId]
+		baseDbMap := baseTableMappingManager.DbReplaceMap[dbMap.IdMap.UpstreamId]
 		require.NotNil(t, baseDbMap)
 		require.Equal(t, baseDbMap.DbID, dbMap.IdMap.DownstreamId)
 		require.Equal(t, baseDbMap.Name, dbMap.Name)
@@ -1662,11 +1659,11 @@ func TestCompactedSplitStrategy(t *testing.T) {
 	}
 
 	cases := []struct {
-		MockSubcompationIter iter.TryNextor[*backuppb.LogFileSubcompaction]
+		MockSubcompationIter iter.TryNextor[logclient.SSTs]
 		ExpectRegionEndKeys  [][]byte
 	}{
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(2, 100, 48*units.MiB, 300),
@@ -1681,7 +1678,7 @@ func TestCompactedSplitStrategy(t *testing.T) {
 			},
 		},
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(1, 100, 32*units.MiB, 10),
@@ -1697,7 +1694,7 @@ func TestCompactedSplitStrategy(t *testing.T) {
 			},
 		},
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(2, 100, 32*units.MiB, 300),
@@ -1722,7 +1719,7 @@ func TestCompactedSplitStrategy(t *testing.T) {
 		mockPDCli.SetRegions(oriRegions)
 
 		client := split.NewClient(mockPDCli, nil, nil, 100, 4)
-		wrapper := restore.PipelineRestorerWrapper[*backuppb.LogFileSubcompaction]{
+		wrapper := restore.PipelineRestorerWrapper[logclient.SSTs]{
 			PipelineRegionsSplitter: split.NewPipelineRegionsSplitter(client, 4*units.MB, 400),
 		}
 
@@ -1777,14 +1774,14 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 	}
 
 	cases := []struct {
-		MockSubcompationIter iter.TryNextor[*backuppb.LogFileSubcompaction]
+		MockSubcompationIter iter.TryNextor[logclient.SSTs]
 		CheckpointSet        map[string]struct{}
 		ProcessedKVCount     int
 		ProcessedSize        int
 		ExpectRegionEndKeys  [][]byte
 	}{
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(2, 100, 48*units.MiB, 300),
@@ -1804,7 +1801,7 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 			},
 		},
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(1, 100, 32*units.MiB, 10),
@@ -1823,7 +1820,7 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 			},
 		},
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(2, 100, 32*units.MiB, 300),
@@ -1846,7 +1843,7 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 			},
 		},
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithOneSst(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(2, 100, 32*units.MiB, 300),
@@ -1869,7 +1866,7 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 			},
 		},
 		{
-			iter.FromSlice([]*backuppb.LogFileSubcompaction{
+			iter.FromSlice([]logclient.SSTs{
 				fakeSubCompactionWithOneSst(1, 100, 16*units.MiB, 100),
 				fakeSubCompactionWithMultiSsts(1, 200, 32*units.MiB, 200),
 				fakeSubCompactionWithOneSst(2, 100, 32*units.MiB, 300),
@@ -1900,7 +1897,7 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 		mockPDCli.SetRegions(oriRegions)
 
 		client := split.NewClient(mockPDCli, nil, nil, 100, 4)
-		wrapper := restore.PipelineRestorerWrapper[*backuppb.LogFileSubcompaction]{
+		wrapper := restore.PipelineRestorerWrapper[logclient.SSTs]{
 			PipelineRegionsSplitter: split.NewPipelineRegionsSplitter(client, 4*units.MB, 400),
 		}
 		totalSize := 0
@@ -1932,8 +1929,8 @@ func TestCompactedSplitStrategyWithCheckpoint(t *testing.T) {
 	}
 }
 
-func fakeSubCompactionWithMultiSsts(tableID, rowID int64, length uint64, num uint64) *backuppb.LogFileSubcompaction {
-	return &backuppb.LogFileSubcompaction{
+func fakeSubCompactionWithMultiSsts(tableID, rowID int64, length uint64, num uint64) logclient.SSTs {
+	return &logclient.CompactedSSTs{&backuppb.LogFileSubcompaction{
 		Meta: &backuppb.LogFileSubcompactionMeta{
 			TableId: tableID,
 		},
@@ -1953,10 +1950,10 @@ func fakeSubCompactionWithMultiSsts(tableID, rowID int64, length uint64, num uin
 				TotalKvs: num,
 			},
 		},
-	}
+	}}
 }
-func fakeSubCompactionWithOneSst(tableID, rowID int64, length uint64, num uint64) *backuppb.LogFileSubcompaction {
-	return &backuppb.LogFileSubcompaction{
+func fakeSubCompactionWithOneSst(tableID, rowID int64, length uint64, num uint64) logclient.SSTs {
+	return &logclient.CompactedSSTs{&backuppb.LogFileSubcompaction{
 		Meta: &backuppb.LogFileSubcompactionMeta{
 			TableId: tableID,
 		},
@@ -1969,7 +1966,7 @@ func fakeSubCompactionWithOneSst(tableID, rowID int64, length uint64, num uint64
 				TotalKvs: num,
 			},
 		},
-	}
+	}}
 }
 
 func fakeFile(tableID, rowID int64, length uint64, num int64) *backuppb.DataFileInfo {

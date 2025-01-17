@@ -29,7 +29,7 @@ import (
 	"github.com/pingcap/tidb/pkg/infoschema"
 	"github.com/pingcap/tidb/pkg/kv"
 	"github.com/pingcap/tidb/pkg/meta/model"
-	pmodel "github.com/pingcap/tidb/pkg/parser/model"
+	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	plannercore "github.com/pingcap/tidb/pkg/planner/core"
 	"github.com/pingcap/tidb/pkg/sessionctx"
@@ -139,7 +139,7 @@ type PointGetExecutor struct {
 	handle           kv.Handle
 	idxInfo          *model.IndexInfo
 	partitionDefIdx  *int
-	partitionNames   []pmodel.CIStr
+	partitionNames   []ast.CIStr
 	idxKey           kv.Key
 	handleVal        []byte
 	idxVals          []types.Datum
@@ -178,7 +178,7 @@ func GetPhysID(tblInfo *model.TableInfo, idx *int) int64 {
 	return tblInfo.ID
 }
 
-func matchPartitionNames(pid int64, partitionNames []pmodel.CIStr, pi *model.PartitionInfo) bool {
+func matchPartitionNames(pid int64, partitionNames []ast.CIStr, pi *model.PartitionInfo) bool {
 	if len(partitionNames) == 0 {
 		return true
 	}
@@ -273,10 +273,11 @@ func (e *PointGetExecutor) Close() error {
 		tableID := e.tblInfo.ID
 		physicalTableID := GetPhysID(e.tblInfo, e.partitionDefIdx)
 		kvReqTotal := e.stats.SnapshotRuntimeStats.GetCmdRPCCount(tikvrpc.CmdGet)
+		rows := e.RuntimeStats().GetActRows()
 		if e.idxInfo != nil {
-			e.indexUsageReporter.ReportPointGetIndexUsage(tableID, physicalTableID, e.idxInfo.ID, e.ID(), kvReqTotal)
+			e.indexUsageReporter.ReportPointGetIndexUsage(tableID, physicalTableID, e.idxInfo.ID, kvReqTotal, rows)
 		} else {
-			e.indexUsageReporter.ReportPointGetIndexUsageForHandle(e.tblInfo, physicalTableID, e.ID(), kvReqTotal)
+			e.indexUsageReporter.ReportPointGetIndexUsageForHandle(e.tblInfo, physicalTableID, kvReqTotal, rows)
 		}
 	}
 	e.done = false
@@ -666,7 +667,7 @@ func (e *PointGetExecutor) get(ctx context.Context, key kv.Key) ([]byte, error) 
 	}
 
 	lock := e.tblInfo.Lock
-	if lock != nil && (lock.Tp == pmodel.TableLockRead || lock.Tp == pmodel.TableLockReadOnly) {
+	if lock != nil && (lock.Tp == ast.TableLockRead || lock.Tp == ast.TableLockReadOnly) {
 		if e.Ctx().GetSessionVars().EnablePointGetCache {
 			cacheDB := e.Ctx().GetStore().GetMemCache()
 			val, err = cacheDB.UnionGet(ctx, e.tblInfo.ID, e.snapshot, key)

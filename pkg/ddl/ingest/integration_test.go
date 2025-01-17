@@ -181,7 +181,7 @@ func TestAddIndexIngestCancel(t *testing.T) {
 	tk.MustExec("create table t (a int, b int);")
 	tk.MustExec("insert into t (a, b) values (1, 1), (2, 2), (3, 3);")
 	cancelled := false
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore", func(job *model.Job) {
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/beforeRunOneJobStep", func(job *model.Job) {
 		if cancelled {
 			return
 		}
@@ -201,7 +201,7 @@ func TestAddIndexIngestCancel(t *testing.T) {
 	})
 	tk.MustGetErrCode("alter table t add index idx(b);", errno.ErrCancelledDDLJob)
 	require.True(t, cancelled)
-	testfailpoint.Disable(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore")
+	testfailpoint.Disable(t, "github.com/pingcap/tidb/pkg/ddl/beforeRunOneJobStep")
 	ok, err := ingest.LitBackCtxMgr.CheckMoreTasksAvailable()
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -250,7 +250,7 @@ func TestAddIndexCancelOnNoneState(t *testing.T) {
 	tk.MustExec("insert into t values(1, 1, 1);")
 
 	first := true
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onJobRunBefore", func(job *model.Job) {
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/beforeRunOneJobStep", func(job *model.Job) {
 		if job.SchemaState == model.StateNone && first {
 			_, err := tkCancel.Exec(fmt.Sprintf("admin cancel ddl jobs %d", job.ID))
 			assert.NoError(t, err)
@@ -494,6 +494,15 @@ func TestAddGlobalIndexInIngest(t *testing.T) {
 	require.Greater(t, len(rsGlobalIndex1.Rows()), len(rsGlobalIndex.Rows()))
 	require.Equal(t, rsGlobalIndex1.String(), rsTable.String())
 	require.Equal(t, rsGlobalIndex1.String(), rsGlobalIndex2.String())
+
+	// for non-unique global idnexes
+	tk.MustExec("alter table t add index idx_7(b) global, add index idx_8(b) global")
+	rsNonUniqueGlobalIndex1 := tk.MustQuery("select * from t use index(idx_7)").Sort()
+	rsTable = tk.MustQuery("select * from t use index()").Sort()
+	rsNonUniqueGlobalIndex2 := tk.MustQuery("select * from t use index(idx_8)").Sort()
+	require.Greater(t, len(rsNonUniqueGlobalIndex1.Rows()), len(rsGlobalIndex.Rows()))
+	require.Equal(t, rsNonUniqueGlobalIndex1.String(), rsTable.String())
+	require.Equal(t, rsNonUniqueGlobalIndex1.String(), rsNonUniqueGlobalIndex2.String())
 }
 
 func TestAddGlobalIndexInIngestWithUpdate(t *testing.T) {
@@ -508,7 +517,7 @@ func TestAddGlobalIndexInIngestWithUpdate(t *testing.T) {
 	tk.MustExec("insert into t (a, b) values (1, 1), (2, 2), (3, 3)")
 	var i atomic.Int32
 	i.Store(3)
-	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/onJobUpdated", func(job *model.Job) {
+	testfailpoint.EnableCall(t, "github.com/pingcap/tidb/pkg/ddl/afterWaitSchemaSynced", func(job *model.Job) {
 		tk2 := testkit.NewTestKit(t, store)
 		tmp := i.Add(1)
 		_, err := tk2.Exec(fmt.Sprintf("insert into test.t values (%d, %d)", tmp, tmp))

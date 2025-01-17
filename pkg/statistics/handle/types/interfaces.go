@@ -260,6 +260,9 @@ type StatsCache interface {
 
 	// UpdateStatsHealthyMetrics updates stats healthy distribution metrics according to stats cache.
 	UpdateStatsHealthyMetrics()
+
+	// TriggerEvict triggers the cache to evict some items
+	TriggerEvict()
 }
 
 // StatsLockTable is the table info of which will be locked.
@@ -342,7 +345,7 @@ type StatsReadWriter interface {
 
 	// SaveStatsToStorage save the stats data to the storage.
 	SaveStatsToStorage(tableID int64, count, modifyCount int64, isIndex int, hg *statistics.Histogram,
-		cms *statistics.CMSketch, topN *statistics.TopN, statsVersion int, isAnalyzed int64, updateAnalyzeTime bool, source string) (err error)
+		cms *statistics.CMSketch, topN *statistics.TopN, statsVersion int, updateAnalyzeTime bool, source string) (err error)
 
 	// SaveTableStatsToStorage saves the stats of a table to storage.
 	SaveTableStatsToStorage(results *statistics.AnalyzeResults, analyzeSnapshot bool, source string) (err error)
@@ -516,7 +519,7 @@ type StatsGlobal interface {
 // DDL is used to handle ddl events.
 type DDL interface {
 	// HandleDDLEvent handles ddl events.
-	HandleDDLEvent(changeEvent *notifier.SchemaChangeEvent) error
+	HandleDDLEvent(ctx context.Context, sctx sessionctx.Context, changeEvent *notifier.SchemaChangeEvent) error
 	// DDLEventCh returns ddl events channel in handle.
 	DDLEventCh() chan *notifier.SchemaChangeEvent
 }
